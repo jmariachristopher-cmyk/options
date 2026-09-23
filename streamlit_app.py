@@ -65,7 +65,10 @@ st.set_page_config(page_title="Options Reversal Zones - Pine Generator", page_ic
 # ═══════════════════════════════════════════════════════════════════
 #  UPSTOX DATA FETCHING
 # ═══════════════════════════════════════════════════════════════════
-def get_nearest_expiry(sess, instrument_key):
+def get_expiry(sess, instrument_key, expiry_type):
+    """expiry_type: 'Weekly' -> nearest upcoming expiry.
+    'Monthly' -> the true monthly-series expiry (the last expiry date within
+    a given month), even if a nearer non-monthly contract happens to exist."""
     r = sess.get(f"{BASE}/option/contract", params={"instrument_key": instrument_key})
     r.raise_for_status()
     contracts = r.json().get("data", [])
@@ -73,12 +76,25 @@ def get_nearest_expiry(sess, instrument_key):
         raise RuntimeError("No contracts returned for this instrument key.")
     expiries = sorted({c["expiry"] for c in contracts})
     today = date.today().isoformat()
-    upcoming = [e for e in expiries if e >= today]
-    return upcoming[0] if upcoming else expiries[-1]
+
+    if expiry_type == "Weekly":
+        upcoming = [e for e in expiries if e >= today]
+        return upcoming[0] if upcoming else expiries[-1]
+
+    # Monthly: group expiries by (year, month), take the LAST expiry in each
+    # month (that's the exchange's designated monthly contract), then pick
+    # the nearest upcoming one of those.
+    by_month = {}
+    for e in expiries:
+        y, mo, _ = e.split("-")
+        by_month.setdefault((y, mo), []).append(e)
+    monthly_expiries = sorted(max(v) for v in by_month.values())
+    upcoming = [e for e in monthly_expiries if e >= today]
+    return upcoming[0] if upcoming else monthly_expiries[-1]
 
 
-def fetch_option_data(sess, instrument_key, strikes_each_side):
-    expiry = get_nearest_expiry(sess, instrument_key)
+def fetch_option_data(sess, instrument_key, strikes_each_side, expiry_type):
+    expiry = get_expiry(sess, instrument_key, expiry_type)
     r = sess.get(f"{BASE}/option/chain", params={"instrument_key": instrument_key, "expiry_date": expiry})
     r.raise_for_status()
     data = r.json().get("data", [])
@@ -283,7 +299,7 @@ for name, cfg in INSTRUMENTS.items():
     if col2.button("Fetch & Generate", key=f"gen_{name}"):
         with st.spinner(f"Pulling {name} option chain from Upstox..."):
             try:
-                chain = fetch_option_data(sess, cfg["key"], STRIKES_EACH_SIDE)
+                chain = fetch_option_data(sess, cfg["key"], STRIKES_EACH_SIDE, cfg["expiry_type"])
                 pine_code = build_pine_script(name, cfg["expiry_type"], chain)
             except Exception as e:
                 st.error(f"{name} failed: {e}")

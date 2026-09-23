@@ -1,54 +1,41 @@
 """
-Options Reversal Zones - Streamlit app (Upstox-powered)
-=========================================================
+Options Reversal Zones - Streamlit app (Upstox-powered, token-only)
+=====================================================================
 Deploy this via GitHub + Streamlit Community Cloud. Open the resulting
-public URL, connect to Upstox once a day, click a button per instrument,
-download a ready-to-paste Pine script with real closing premiums baked in.
+public URL, paste your Upstox Analytics Token once, click a button per
+instrument, download a ready-to-paste Pine script with real closing
+premiums baked in.
 
-WHY STREAMLIT SOLVES THE CORS PROBLEM
-The earlier "pure webpage" idea failed because a browser is not allowed to
-call Upstox's API directly (CORS + Upstox explicitly disallows browser-side
-token automation). Streamlit apps run Python on a server, so the OAuth
-token exchange and the option-chain fetch both happen server-side here -
-no browser JS ever talks to Upstox directly, so there's nothing for CORS
-to block.
+WHY THIS VERSION HAS NO LOGIN FLOW
+Upstox has a token type called the "Analytics Token": a long-lived
+(1-year) read-only token you generate with one click from your Upstox
+Developer Apps page - no OAuth redirect, no client_id/redirect_uri
+matching, no daily re-login. It covers exactly what this app needs
+(option chain + option contracts), so there's no reason to use the full
+trading OAuth flow (the thing that kept failing with UDAPI100068) at all.
 
-────────────────────────────────────────────────────────────────────────
-DEPLOY STEPS
-────────────────────────────────────────────────────────────────────────
-1. Create a new GitHub repo (public or private, either works) containing:
-     - streamlit_app.py   (this file)
-     - requirements.txt   (included alongside this file)
+GENERATE YOUR TOKEN (one-time, about 30 seconds)
+  1. Go to https://account.upstox.com/developer/apps -> "Analytics" tab.
+  2. Click "Generate Token" -> Confirm.
+  3. Copy the full token shown (click the copy icon next to it).
+     Keep it secret - anyone with it can read your account's market data.
 
-2. Go to https://share.streamlit.io -> "New app" -> sign in with GitHub ->
-   pick your repo/branch -> set "Main file path" to streamlit_app.py ->
-   Deploy. You'll get a public URL like:
-     https://your-app-name.streamlit.app
+DEPLOY STEPS (GitHub + Streamlit Community Cloud)
+  1. Push these files to a GitHub repo: streamlit_app.py, requirements.txt
+  2. Go to https://share.streamlit.io -> New app -> pick your repo/branch
+     -> Main file path: streamlit_app.py -> Deploy.
+  3. (Optional but recommended) In Streamlit Cloud: your app -> Settings
+     -> Secrets, paste:
+         UPSTOX_ANALYTICS_TOKEN = "your_token_here"
+     This way you don't paste the token into the page every visit, and
+     it's never committed to GitHub or visible to viewers.
+     If you skip this, the app just asks you to paste it into the page
+     each time instead - also fine.
+  4. Open the app, generate & download a Pine script for any instrument.
 
-3. In your Upstox Developer app (https://developer.upstox.com), set the
-   Redirect URI to that EXACT URL (including the trailing slash):
-     https://your-app-name.streamlit.app/
-
-4. Back in Streamlit Cloud: open your app -> Settings -> Secrets, and
-   paste (with YOUR real values):
-
-     UPSTOX_CLIENT_ID = "your_client_id"
-     UPSTOX_CLIENT_SECRET = "your_client_secret"
-     REDIRECT_URI = "https://your-app-name.streamlit.app/"
-
-   Secrets entered here are never committed to GitHub and are not visible
-   to anyone viewing the app - only your server-side code can read them.
-
-5. Reload the app, click "Connect to Upstox", log in, then generate and
-   download a Pine script for any instrument.
-
-NOTE: your app's URL is public by default (anyone with the link can open
-it). Your Upstox client_secret stays safe either way (it lives only in
-Streamlit secrets, server-side), but if you don't want strangers using
-your Upstox login to pull data, go to your app's Settings -> Sharing in
-Streamlit Cloud and restrict viewers to specific emails, or keep the
-GitHub repo private (Streamlit Cloud can still deploy private repos once
-linked to your GitHub account).
+NOTE: your app's URL is public by default. Restrict viewers under your
+app's Settings -> Sharing in Streamlit Cloud if you don't want others
+using it, or deploy from a private GitHub repo.
 
 I could not test this against live Upstox servers or a live Streamlit
 Cloud deployment from the environment I wrote this in - please run it
@@ -76,25 +63,7 @@ st.set_page_config(page_title="Options Reversal Zones - Pine Generator", page_ic
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  CONFIG (from Streamlit secrets, with a manual fallback for local runs)
-# ═══════════════════════════════════════════════════════════════════
-def get_config():
-    try:
-        return (
-            st.secrets["UPSTOX_CLIENT_ID"],
-            st.secrets["UPSTOX_CLIENT_SECRET"],
-            st.secrets["REDIRECT_URI"],
-        )
-    except Exception:
-        st.warning("No secrets.toml found - enter credentials manually for this local test run.")
-        cid = st.text_input("Client ID")
-        csec = st.text_input("Client Secret", type="password")
-        ruri = st.text_input("Redirect URI (must match your Upstox app exactly)", value="http://localhost:8501/")
-        return cid, csec, ruri
-
-
-# ═══════════════════════════════════════════════════════════════════
-#  UPSTOX DATA FETCHING (same logic as the local Flask version)
+#  UPSTOX DATA FETCHING
 # ═══════════════════════════════════════════════════════════════════
 def get_nearest_expiry(sess, instrument_key):
     r = sess.get(f"{BASE}/option/contract", params={"instrument_key": instrument_key})
@@ -285,69 +254,47 @@ plot(na, "Lower Reversal Zone PE", color=color.blue)
 # ═══════════════════════════════════════════════════════════════════
 st.title("📈 Options Reversal Zones - Pine Script Generator")
 
-client_id, client_secret, redirect_uri = get_config()
+st.subheader("1. Your Upstox Analytics Token")
+st.caption(
+    "Generate once, valid for a year: account.upstox.com/developer/apps → "
+    "Analytics tab → Generate Token."
+)
 
-if not client_id or not client_secret or not redirect_uri:
+try:
+    token = st.secrets.get("UPSTOX_ANALYTICS_TOKEN")
+except Exception:
+    token = None
+
+if not token:
+    token = st.text_input("Paste your Analytics Token", type="password")
+
+if not token:
     st.stop()
 
-# Handle the OAuth redirect: Upstox sends us back here with ?code=...
-query_code = st.query_params.get("code")
+sess = requests.Session()
+sess.headers.update({"Authorization": f"Bearer {token}", "Accept": "application/json"})
 
-if "access_token" not in st.session_state and query_code:
-    resp = requests.post(
-        f"{BASE}/login/authorization/token",
-        headers={"accept": "application/json", "Content-Type": "application/x-www-form-urlencoded"},
-        data={
-            "code": query_code,
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "redirect_uri": redirect_uri,
-            "grant_type": "authorization_code",
-        },
-    )
-    if resp.status_code == 200:
-        st.session_state["access_token"] = resp.json()["access_token"]
-        st.query_params.clear()
-        st.rerun()
-    else:
-        st.error(f"Token exchange failed: {resp.text[:300]}")
-
-st.subheader("1. Connect to Upstox")
-if "access_token" in st.session_state:
-    st.success("Connected ✓")
-    if st.button("Disconnect"):
-        del st.session_state["access_token"]
-        st.rerun()
-else:
-    auth_url = f"{BASE}/login/authorization/dialog?client_id={client_id}&redirect_uri={redirect_uri}"
-    st.link_button("Connect to Upstox", auth_url)
-    st.caption(f"Redirect URI registered on your Upstox app must be exactly: `{redirect_uri}`")
+st.success("Token set ✓")
 
 st.subheader("2. Generate a Pine script")
-if "access_token" not in st.session_state:
-    st.info("Connect to Upstox first.")
-else:
-    sess = requests.Session()
-    sess.headers.update({"Authorization": f"Bearer {st.session_state['access_token']}", "Accept": "application/json"})
-
-    for name, cfg in INSTRUMENTS.items():
-        col1, col2 = st.columns([3, 2])
-        col1.write(f"**{name}**")
-        if col2.button(f"Fetch & Generate", key=f"gen_{name}"):
-            with st.spinner(f"Pulling {name} option chain from Upstox..."):
-                try:
-                    chain = fetch_option_data(sess, cfg["key"], STRIKES_EACH_SIDE)
-                    pine_code = build_pine_script(name, cfg["expiry_type"], chain)
-                except Exception as e:
-                    st.error(f"{name} failed: {e}")
-                else:
-                    st.success(f"{name}: expiry {chain['expiry']}, spot {chain['spot']}")
-                    st.download_button(
-                        f"Download {name} Pine script",
-                        data=pine_code,
-                        file_name=f"{name}_reversal_zones_{chain['expiry']}.pine",
-                        mime="text/plain",
-                        key=f"dl_{name}",
-                    )
-                    with st.expander(f"Preview {name}.pine"):
-                        st.code(pine_code, language="text")
+for name, cfg in INSTRUMENTS.items():
+    col1, col2 = st.columns([3, 2])
+    col1.write(f"**{name}**")
+    if col2.button("Fetch & Generate", key=f"gen_{name}"):
+        with st.spinner(f"Pulling {name} option chain from Upstox..."):
+            try:
+                chain = fetch_option_data(sess, cfg["key"], STRIKES_EACH_SIDE)
+                pine_code = build_pine_script(name, cfg["expiry_type"], chain)
+            except Exception as e:
+                st.error(f"{name} failed: {e}")
+            else:
+                st.success(f"{name}: expiry {chain['expiry']}, spot {chain['spot']}")
+                st.download_button(
+                    f"Download {name} Pine script",
+                    data=pine_code,
+                    file_name=f"{name}_reversal_zones_{chain['expiry']}.pine",
+                    mime="text/plain",
+                    key=f"dl_{name}",
+                )
+                with st.expander(f"Preview {name}.pine"):
+                    st.code(pine_code, language="text")

@@ -55,6 +55,7 @@ before trusting the generated Pine script.
 """
 
 import json
+import time
 from datetime import date, datetime, timedelta
 
 import pyotp
@@ -196,29 +197,39 @@ def get_spot(master, sess, jwt_token, api_key, cfg):
     return fetched[0]["ltp"]
 
 
-def get_prev_close(sess, jwt_token, api_key, exch_seg, symboltoken):
+def get_prev_close(sess, jwt_token, api_key, exch_seg, symboltoken, max_retries=6):
     today = date.today()
     from_dt = (today - timedelta(days=10)).strftime("%Y-%m-%d 00:00")
     to_dt = today.strftime("%Y-%m-%d 00:00")
-    r = sess.post(
-        f"{BASE}/rest/secure/angelbroking/historical/v1/getCandleData",
-        headers=angel_headers(api_key, jwt_token),
-        json={"exchange": exch_seg, "symboltoken": symboltoken, "interval": "ONE_DAY",
-              "fromdate": from_dt, "todate": to_dt},
-    )
-    r.raise_for_status()
-    body = r.json()
-    if not body.get("status"):
-        raise RuntimeError(f"Historical candle fetch failed: {body.get('message')}")
-    candles = body.get("data", [])
-    if not candles:
-        return None
-    today_iso = today.isoformat()
-    for c in reversed(candles):  # candles are oldest-first; walk backwards for most recent
-        candle_date = c[0][:10]
-        if candle_date < today_iso:
-            return c[4]
-    return candles[-1][4]
+
+    for attempt in range(max_retries):
+        r = sess.post(
+            f"{BASE}/rest/secure/angelbroking/historical/v1/getCandleData",
+            headers=angel_headers(api_key, jwt_token),
+            json={"exchange": exch_seg, "symboltoken": symboltoken, "interval": "ONE_DAY",
+                  "fromdate": from_dt, "todate": to_dt},
+        )
+        if r.status_code == 403 and "rate" in r.text.lower():
+            # Angel One's historical API has a very strict, aggressive rate
+            # limit and returns 403 almost immediately under back-to-back
+            # calls - back off and retry rather than treating this as fatal.
+            time.sleep(1.5 * (attempt + 1))
+            continue
+        r.raise_for_status()
+        body = r.json()
+        if not body.get("status"):
+            raise RuntimeError(f"Historical candle fetch failed: {body.get('message')}")
+        candles = body.get("data", [])
+        if not candles:
+            return None
+        today_iso = today.isoformat()
+        for c in reversed(candles):  # candles are oldest-first; walk backwards for most recent
+            candle_date = c[0][:10]
+            if candle_date < today_iso:
+                return c[4]
+        return candles[-1][4]  # fallback: most recent available, even if it's "today"
+
+    raise RuntimeError("Historical candle fetch kept hitting Angel One's rate limit after retries - try again shortly.")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -261,7 +272,9 @@ def fetch_option_data(master, sess, jwt_token, api_key, instrument_name, strikes
         if not ce_token or not pe_token:
             raise RuntimeError(f"Missing CE/PE contract for strike {s}.")
         ce_close = get_prev_close(sess, jwt_token, api_key, cfg["exch_seg"], ce_token)
+        time.sleep(0.35)  # Angel One's historical API has a strict rate limit - pace requests
         pe_close = get_prev_close(sess, jwt_token, api_key, cfg["exch_seg"], pe_token)
+        time.sleep(0.35)
         if ce_close is None or pe_close is None:
             raise RuntimeError(f"No historical candle available for strike {s}.")
         ext_ce.append(ce_close)
